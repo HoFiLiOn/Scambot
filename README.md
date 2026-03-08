@@ -1,1 +1,0 @@
-# Scambot
