@@ -1,6 +1,8 @@
 import asyncio
 import sqlite3
 import logging
+import sys
+from datetime import datetime
 
 from telethon import TelegramClient, events
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,7 +18,11 @@ SOURCE_CHANNEL = '@TWSA_HOF'
 BOT_NAME = "Vexor Observer"
 # ==================================
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
 # ---------- БАЗА ДАННЫХ ----------
@@ -26,6 +32,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS subscribers (user_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
+    logger.info("База данных инициализирована")
 
 def add_subscriber(user_id):
     conn = sqlite3.connect('subscribers.db')
@@ -80,9 +87,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"<b>👁 {BOT_NAME}</b>\n\n"
         f"Привет, {user.first_name}!\n\n"
-        f"Я незаметно слежу за каналом <b>Vexor cheats | News</b>\n"
-        f"и присылаю все новые посты подписчикам.\n\n"
-        f"Никто не узнает, что ты следишь 😉\n\n"
+        f"Я слежу за каналом <b>Vexor cheats | News</b>\n"
+        f"и присылаю новые посты.\n\n"
         f"👇 <b>ВЫБЕРИ ДЕЙСТВИЕ:</b>",
         reply_markup=get_main_keyboard(),
         parse_mode='HTML'
@@ -97,8 +103,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_subscriber(user_id)
         await query.edit_message_text(
             f"<b>✅ ТЫ ПОДПИСАН</b>\n\n"
-            f"Теперь все новые посты из <b>Vexor cheats | News</b>\n"
-            f"будут приходить сюда.\n\n"
+            f"Новые посты будут приходить сюда.\n\n"
             f"👀 Наблюдателей: <b>{get_subscriber_count()}</b>",
             reply_markup=get_main_keyboard(),
             parse_mode='HTML'
@@ -117,136 +122,133 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"<b>📊 СТАТИСТИКА</b>\n\n"
             f"👀 Наблюдателей: <b>{get_subscriber_count()}</b>\n"
-            f"📢 Канал: <b>Vexor cheats | News</b>\n"
-            f"🕐 Обновления: моментальные",
+            f"📢 Канал: <b>Vexor cheats | News</b>",
             reply_markup=get_main_keyboard(),
             parse_mode='HTML'
         )
     
     elif query.data in ['last_5', 'last_10']:
         n = 5 if query.data == 'last_5' else 10
-        await query.edit_message_text(f"<i>⏳ Загружаю {n} последних постов...</i>", parse_mode='HTML')
-        
-        global userbot_client
-        if not userbot_client or not userbot_client.is_connected():
-            await query.edit_message_text(
-                f"<b>❌ ОШИБКА</b>\n\nСервис временно недоступен",
-                reply_markup=get_main_keyboard(),
-                parse_mode='HTML'
-            )
-            return
+        await query.edit_message_text(f"⏳ Загружаю {n} последних постов...", parse_mode='HTML')
         
         try:
-            channel = await userbot_client.get_entity(SOURCE_CHANNEL)
-            messages = []
-            async for msg in userbot_client.iter_messages(channel, limit=n):
-                text = msg.text if msg.text else "📷 Медиа"
-                if len(text) > 400:
-                    text = text[:400] + "..."
-                link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{msg.id}"
-                messages.append(
-                    f"<b>📌 {msg.date.strftime('%d.%m %H:%M')}</b>\n"
-                    f"{text}\n"
-                    f"<a href='{link}'>🔗 Читать</a>\n"
-                )
-            
-            if messages:
-                await query.edit_message_text(
-                    "\n\n".join(messages[::-1]),
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
-                await query.message.reply_text("👇 Чтобы вернуться в меню, нажми /start", reply_markup=get_main_keyboard())
-            else:
-                await query.edit_message_text(
-                    f"<i>Нет постов в канале</i>",
-                    reply_markup=get_main_keyboard(),
-                    parse_mode='HTML'
-                )
+            async with TelegramClient('temp_session', API_ID, API_HASH) as temp_client:
+                await temp_client.start(PHONE)
+                channel = await temp_client.get_entity(SOURCE_CHANNEL)
+                messages = []
+                async for msg in temp_client.iter_messages(channel, limit=n):
+                    text = msg.text if msg.text else "📷 Медиа"
+                    if len(text) > 400:
+                        text = text[:400] + "..."
+                    link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{msg.id}"
+                    messages.append(
+                        f"<b>📌 {msg.date.strftime('%d.%m %H:%M')}</b>\n"
+                        f"{text}\n"
+                        f"<a href='{link}'>🔗 Читать</a>"
+                    )
+                
+                if messages:
+                    await query.edit_message_text(
+                        "\n\n".join(messages),
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                else:
+                    await query.edit_message_text("Нет постов в канале", reply_markup=get_main_keyboard(), parse_mode='HTML')
         except Exception as e:
             logger.error(f"Ошибка: {e}")
-            await query.edit_message_text(
-                f"<b>❌ ОШИБКА</b>\n\nНе удалось загрузить посты",
-                reply_markup=get_main_keyboard(),
-                parse_mode='HTML'
-            )
+            await query.edit_message_text("❌ Ошибка загрузки постов", reply_markup=get_main_keyboard(), parse_mode='HTML')
 
-# ---------- РАССЫЛКА ПОДПИСЧИКАМ ----------
+# ---------- РАССЫЛКА ----------
 async def send_to_subscribers(bot_app: Application, post_text: str, post_link: str):
     subscribers = get_all_subscribers()
     if not subscribers:
         return
     
-    success = 0
     for user_id in subscribers:
         try:
             await bot_app.bot.send_message(
                 chat_id=user_id,
-                text=f"<b>🔔 НОВЫЙ ПОСТ В КАНАЛЕ!</b>\n\n{post_text[:500]}\n\n<a href='{post_link}'>🔗 Открыть</a>",
+                text=f"<b>🔔 НОВЫЙ ПОСТ!</b>\n\n{post_text[:500]}\n\n<a href='{post_link}'>🔗 Открыть</a>",
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-            success += 1
             await asyncio.sleep(0.05)
         except Exception as e:
             if "Forbidden" in str(e):
                 remove_subscriber(user_id)
-            logger.error(f"Ошибка отправки {user_id}: {e}")
-    
-    logger.info(f"Рассылка: {success}/{len(subscribers)}")
+            logger.error(f"Ошибка {user_id}: {e}")
 
-# ---------- ЮЗЕРБОТ ----------
-userbot_client = TelegramClient('userbot_session', API_ID, API_HASH)
-
+# ---------- ЮЗЕРБОТ (ОТДЕЛЬНЫЙ ПРОЦЕСС) ----------
 async def run_userbot():
-    await userbot_client.start(PHONE)
-    logger.info(f"✅ Юзербот запущен, слежу за {SOURCE_CHANNEL}")
+    client = TelegramClient('userbot_session', API_ID, API_HASH)
+    await client.start(PHONE)
+    logger.info(f"Юзербот запущен, слежу за {SOURCE_CHANNEL}")
     
-    bot_entity = await userbot_client.get_entity(f"@{BOT_TOKEN.split(':')[0]}")
+    bot_username = (await client.get_me()).username
     
-    @userbot_client.on(events.NewMessage(chats=SOURCE_CHANNEL))
+    @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
     async def on_new_post(event):
         try:
-            post_text = event.message.text if event.message.text else "📷 Новый пост"
+            post_text = event.message.text if event.message.text else "Новый пост"
             post_link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{event.message.id}"
             
-            await userbot_client.send_message(
-                bot_entity,
-                f"/forward_post\n{post_text}\n---\n{post_link}"
+            # Отправляем команду боту через прямое сообщение
+            await client.send_message(
+                bot_username,
+                f"/forward_post {post_link}\n{post_text[:500]}"
             )
-            logger.info(f"Новый пост отправлен боту")
+            logger.info("Новый пост отправлен боту")
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
+            logger.error(f"Ошибка пересылки: {e}")
     
-    await userbot_client.run_until_disconnected()
+    await client.run_until_disconnected()
 
-# ---------- ПРИЕМ ПОСТОВ ОТ ЮЗЕРБОТА ----------
+# ---------- БОТ ----------
+async def run_bot():
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('forward_post', handle_forward))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    logger.info("Бот запущен")
+    
+    # Держим бота живым
+    while True:
+        await asyncio.sleep(1)
+
 async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     
     text = update.message.text
     if text.startswith('/forward_post'):
-        parts = text.split('\n---\n')
+        parts = text.split('\n', 1)
         if len(parts) == 2:
-            post_text = parts[0].replace('/forward_post\n', '')
-            post_link = parts[1]
-            await send_to_subscribers(context.bot, post_text, post_link)
+            link_part = parts[0].replace('/forward_post ', '')
+            post_text = parts[1]
+            await send_to_subscribers(context.bot, post_text, link_part)
 
-# ---------- ЗАПУСК ----------
+# ---------- ГЛАВНЫЙ ЗАПУСК ----------
 async def main():
     init_db()
     
-    global bot_app
-    bot_app = Application.builder().token(BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler('start', start))
-    bot_app.add_handler(CommandHandler('forward_post', handle_forward))
-    bot_app.add_handler(CallbackQueryHandler(button_handler))
-    
+    # Запускаем оба сервиса конкурентно
     await asyncio.gather(
-        bot_app.run_polling(),
-        run_userbot()
+        run_bot(),
+        run_userbot(),
+        return_exceptions=True
     )
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен")
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
