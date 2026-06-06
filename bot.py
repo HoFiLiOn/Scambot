@@ -2,7 +2,6 @@ import asyncio
 import sqlite3
 import logging
 import sys
-from datetime import datetime
 
 from telethon import TelegramClient, events
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -160,14 +159,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Ошибка загрузки постов", reply_markup=get_main_keyboard(), parse_mode='HTML')
 
 # ---------- РАССЫЛКА ----------
-async def send_to_subscribers(bot_app: Application, post_text: str, post_link: str):
+async def send_to_subscribers(application: Application, post_text: str, post_link: str):
     subscribers = get_all_subscribers()
     if not subscribers:
         return
     
     for user_id in subscribers:
         try:
-            await bot_app.bot.send_message(
+            await application.bot.send_message(
                 chat_id=user_id,
                 text=f"<b>🔔 НОВЫЙ ПОСТ!</b>\n\n{post_text[:500]}\n\n<a href='{post_link}'>🔗 Открыть</a>",
                 parse_mode='HTML',
@@ -190,7 +189,7 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(parts) == 2:
             link_part = parts[0].replace('/forward_post ', '')
             post_text = parts[1]
-            await send_to_subscribers(context.bot, post_text, link_part)
+            await send_to_subscribers(context.application, post_text, link_part)
 
 # ---------- ЮЗЕРБОТ ----------
 async def run_userbot():
@@ -198,9 +197,7 @@ async def run_userbot():
     await client.start(PHONE)
     logger.info(f"✅ Юзербот запущен, слежу за {SOURCE_CHANNEL}")
     
-    # Получаем username бота
-    bot_info = await client.get_entity(int(BOT_TOKEN.split(':')[0]))
-    bot_username = bot_info.username
+    bot_entity = await client.get_entity(int(BOT_TOKEN.split(':')[0]))
     
     @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
     async def on_new_post(event):
@@ -209,7 +206,7 @@ async def run_userbot():
             post_link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{event.message.id}"
             
             await client.send_message(
-                bot_username,
+                bot_entity,
                 f"/forward_post {post_link}\n{post_text[:500]}"
             )
             logger.info("✅ Новый пост отправлен боту")
@@ -222,13 +219,13 @@ async def run_userbot():
 async def main():
     init_db()
     
-    # Запускаем бота
+    # Создаём приложение бота
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('forward_post', handle_forward))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # Запускаем polling бота
+    # Запускаем бота
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
@@ -237,11 +234,8 @@ async def main():
     # Запускаем юзербота параллельно
     userbot_task = asyncio.create_task(run_userbot())
     
-    # Держим оба процесса
-    await asyncio.gather(
-        application.updater.idle(),
-        userbot_task
-    )
+    # Ждём завершения (никогда не завершится)
+    await userbot_task
 
 if __name__ == '__main__':
     try:
