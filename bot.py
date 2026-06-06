@@ -20,7 +20,7 @@ BOT_NAME = "Vexor Observer"
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
@@ -179,49 +179,7 @@ async def send_to_subscribers(bot_app: Application, post_text: str, post_link: s
                 remove_subscriber(user_id)
             logger.error(f"Ошибка {user_id}: {e}")
 
-# ---------- ЮЗЕРБОТ (ОТДЕЛЬНЫЙ ПРОЦЕСС) ----------
-async def run_userbot():
-    client = TelegramClient('userbot_session', API_ID, API_HASH)
-    await client.start(PHONE)
-    logger.info(f"Юзербот запущен, слежу за {SOURCE_CHANNEL}")
-    
-    bot_username = (await client.get_me()).username
-    
-    @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
-    async def on_new_post(event):
-        try:
-            post_text = event.message.text if event.message.text else "Новый пост"
-            post_link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{event.message.id}"
-            
-            # Отправляем команду боту через прямое сообщение
-            await client.send_message(
-                bot_username,
-                f"/forward_post {post_link}\n{post_text[:500]}"
-            )
-            logger.info("Новый пост отправлен боту")
-        except Exception as e:
-            logger.error(f"Ошибка пересылки: {e}")
-    
-    await client.run_until_disconnected()
-
-# ---------- БОТ ----------
-async def run_bot():
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('forward_post', handle_forward))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    
-    logger.info("Бот запущен")
-    
-    # Держим бота живым
-    while True:
-        await asyncio.sleep(1)
-
+# ---------- ОБРАБОТЧИК ФОРВАРДА ----------
 async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -234,15 +192,55 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
             post_text = parts[1]
             await send_to_subscribers(context.bot, post_text, link_part)
 
-# ---------- ГЛАВНЫЙ ЗАПУСК ----------
+# ---------- ЮЗЕРБОТ ----------
+async def run_userbot():
+    client = TelegramClient('userbot_session', API_ID, API_HASH)
+    await client.start(PHONE)
+    logger.info(f"✅ Юзербот запущен, слежу за {SOURCE_CHANNEL}")
+    
+    # Получаем username бота
+    bot_info = await client.get_entity(int(BOT_TOKEN.split(':')[0]))
+    bot_username = bot_info.username
+    
+    @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
+    async def on_new_post(event):
+        try:
+            post_text = event.message.text if event.message.text else "Новый пост"
+            post_link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{event.message.id}"
+            
+            await client.send_message(
+                bot_username,
+                f"/forward_post {post_link}\n{post_text[:500]}"
+            )
+            logger.info("✅ Новый пост отправлен боту")
+        except Exception as e:
+            logger.error(f"❌ Ошибка пересылки: {e}")
+    
+    await client.run_until_disconnected()
+
+# ---------- ОСНОВНОЙ ЗАПУСК ----------
 async def main():
     init_db()
     
-    # Запускаем оба сервиса конкурентно
+    # Запускаем бота
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('forward_post', handle_forward))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
+    # Запускаем polling бота
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    logger.info("✅ Бот запущен и готов к работе!")
+    
+    # Запускаем юзербота параллельно
+    userbot_task = asyncio.create_task(run_userbot())
+    
+    # Держим оба процесса
     await asyncio.gather(
-        run_bot(),
-        run_userbot(),
-        return_exceptions=True
+        application.updater.idle(),
+        userbot_task
     )
 
 if __name__ == '__main__':
