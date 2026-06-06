@@ -2,25 +2,20 @@ import asyncio
 import sqlite3
 import logging
 import sys
-import feedparser
 import requests
-import time
+import json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from bs4 import BeautifulSoup
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = '8891687206:AAHUcgCDsiZr5YqQyx4kWPsMWfmw8IttikA'
-SOURCE_CHANNEL = '@TWSA_HOF'  # Для RSS нужно преобразовать
+SOURCE_CHANNEL = '@TWSA_HOF'
 BOT_NAME = "Vexor Observer"
 
-# Каналы Telegram редко имеют RSS, но есть костыль через tgstat или t.me/rss/
-# ИЛИ используем публичный API: https://api.telegram.org/bot{token}/getUpdates
-# Но для чтения канала без API_ID - почти невозможно.
-
-# Альтернатива: парсинг через tg-channel-parser (публичный)
-# ==========================================================
+# Публичный JSON API для Telegram каналов (без авторизации)
+API_URL = f"https://tg.i-c-a.su/json/{SOURCE_CHANNEL}"
+# ==================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +31,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS subscribers (user_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
+    logger.info("База данных готова")
 
 def add_subscriber(user_id):
     conn = sqlite3.connect('subscribers.db')
@@ -59,70 +55,59 @@ def get_all_subscribers():
     conn.close()
     return [row[0] for row in rows]
 
-# ---------- ПАРСИНГ КАНАЛА ЧЕРЕЗ ПУБЛИЧНЫЙ ПРОКСИ ----------
-# Некоторые сервисы предоставляют RSS для Telegram каналов
-# Например: https://tg.i-c-a.su/json/@TWSA_HOF
-# Или: https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1
-
-RSS_URL = f"https://tg.i-c-a.su/json/@TWSA_HOF"  # Публичный API без авторизации
-
-async def get_last_posts(limit=5):
+# ---------- ПОЛУЧЕНИЕ ПОСТОВ ----------
+def get_channel_messages(limit=5):
     try:
-        response = requests.get(RSS_URL, timeout=10)
+        response = requests.get(API_URL, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            posts = []
-            for msg in data.get('messages', [])[:limit]:
-                text = msg.get('text', 'Нет текста')
+            messages = data.get('messages', [])
+            result = []
+            for msg in messages[:limit]:
+                text = msg.get('text', '📷 Медиа')
+                if isinstance(text, list):
+                    text = ' '.join(str(item) for item in text)
                 date = datetime.fromtimestamp(msg.get('date', 0))
-                link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{msg.get('id')}"
-                posts.append({
+                msg_id = msg.get('id')
+                link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{msg_id}"
+                result.append({
                     'text': text[:400],
                     'date': date,
-                    'link': link
+                    'link': link,
+                    'id': msg_id
                 })
-            return posts
+            return result
         else:
             logger.error(f"Ошибка API: {response.status_code}")
             return []
     except Exception as e:
-        logger.error(f"Ошибка парсинга: {e}")
+        logger.error(f"Ошибка: {e}")
         return []
 
-async def monitor_channel(bot_app: Application):
-    """Мониторинг новых постов через публичный API"""
-    last_post_id = None
-    
+# ---------- МОНИТОРИНГ ----------
+last_post_id = None
+
+async def monitor_channel(bot_app):
+    global last_post_id
     while True:
         try:
-            response = requests.get(RSS_URL, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                messages = data.get('messages', [])
-                
-                if messages:
-                    latest = messages[0]
-                    current_id = latest.get('id')
-                    
-                    if last_post_id is None:
-                        last_post_id = current_id
-                        logger.info(f"Начат мониторинг, последний ID: {last_post_id}")
-                    elif current_id != last_post_id:
-                        # Новый пост!
-                        last_post_id = current_id
-                        text = latest.get('text', 'Новый пост')
-                        link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{current_id}"
-                        await send_to_subscribers(bot_app, text, link)
-                        logger.info(f"Новый пост отправлен подписчикам: {link}")
+            posts = get_channel_messages(limit=1)
+            if posts:
+                latest = posts[0]
+                if last_post_id is None:
+                    last_post_id = latest['id']
+                    logger.info(f"Начат мониторинг, последний ID: {last_post_id}")
+                elif latest['id'] != last_post_id:
+                    last_post_id = latest['id']
+                    await send_to_subscribers(bot_app, latest['text'], latest['link'])
+                    logger.info(f"Новый пост отправлен: {latest['link']}")
             
-            await asyncio.sleep(5)  # Проверяем каждые 5 секунд
-            
+            await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"Ошибка мониторинга: {e}")
             await asyncio.sleep(10)
 
-# ---------- РАССЫЛКА ----------
-async def send_to_subscribers(bot_app: Application, post_text: str, post_link: str):
+async def send_to_subscribers(bot_app, post_text, post_link):
     subscribers = get_all_subscribers()
     if not subscribers:
         return
@@ -131,7 +116,7 @@ async def send_to_subscribers(bot_app: Application, post_text: str, post_link: s
         try:
             await bot_app.bot.send_message(
                 chat_id=user_id,
-                text=f"🔔 НОВЫЙ ПОСТ!\n\n{post_text[:500]}\n\n{post_link}",
+                text=f"🔔 НОВЫЙ ПОСТ В КАНАЛЕ!\n\n{post_text[:500]}\n\n{post_link}",
                 disable_web_page_preview=True
             )
             await asyncio.sleep(0.05)
@@ -146,17 +131,18 @@ def get_main_keyboard():
         [InlineKeyboardButton("✅ ПОДПИСАТЬСЯ", callback_data='subscribe')],
         [InlineKeyboardButton("❌ ОТПИСАТЬСЯ", callback_data='unsubscribe')],
         [InlineKeyboardButton("📜 ПОСЛЕДНИЕ 5", callback_data='last_5')],
+        [InlineKeyboardButton("📜 ПОСЛЕДНИЕ 10", callback_data='last_10')],
+        [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data='stats')],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
-        f"👁 {BOT_NAME} (BETA - БЕЗ API)\n\n"
+        f"👁 {BOT_NAME} (ЭКСПЕРИМЕНТ)\n\n"
         f"Привет, {user.first_name}!\n\n"
-        f"⚠️ Экспериментальная версия без API ID/Hash\n"
-        f"Работает через публичный парсинг канала.\n\n"
-        f"Может работать с задержкой и нестабильно.\n\n"
+        f"⚠️ Версия БЕЗ API ID/Hash\n"
+        f"Работает через публичный парсинг.\n\n"
         f"👇 ВЫБЕРИ ДЕЙСТВИЕ:",
         reply_markup=get_main_keyboard()
     )
@@ -169,28 +155,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'subscribe':
         add_subscriber(user_id)
         await query.edit_message_text(
-            f"✅ ТЫ ПОДПИСАН (ЭКСПЕРИМЕНТ)\n\n"
-            f"Попробуем следить без API...\n\n"
-            f"👀 Наблюдателей: {len(get_all_subscribers())}",
+            f"✅ ПОДПИСАН (ЭКСПЕРИМЕНТ)\n\n"
+            f"👀 Подписчиков: {len(get_all_subscribers())}",
             reply_markup=get_main_keyboard()
         )
     
     elif query.data == 'unsubscribe':
         remove_subscriber(user_id)
+        await query.edit_message_text("❌ ОТПИСАН", reply_markup=get_main_keyboard())
+    
+    elif query.data == 'stats':
         await query.edit_message_text(
-            f"❌ ТЫ ОТПИСАН",
+            f"📊 СТАТИСТИКА\n\n"
+            f"👀 Подписчиков: {len(get_all_subscribers())}\n"
+            f"📢 Канал: Vexor cheats | News\n"
+            f"⚠️ Режим: экспериментальный (без API)",
             reply_markup=get_main_keyboard()
         )
     
-    elif query.data == 'last_5':
-        await query.edit_message_text("⏳ Загружаю последние 5 постов...")
+    elif query.data in ['last_5', 'last_10']:
+        n = 5 if query.data == 'last_5' else 10
+        await query.edit_message_text(f"⏳ Загружаю {n} последних постов...")
         
-        posts = await get_last_posts(5)
+        posts = get_channel_messages(limit=n)
         if posts:
             text = "\n\n".join([f"📌 {p['date'].strftime('%d.%m %H:%M')}\n{p['text']}\n{p['link']}" for p in posts])
             await query.edit_message_text(text, disable_web_page_preview=True)
         else:
-            await query.edit_message_text("❌ Не удалось загрузить посты")
+            await query.edit_message_text("❌ Ошибка загрузки постов", reply_markup=get_main_keyboard())
 
 # ---------- ЗАПУСК ----------
 async def main():
@@ -206,9 +198,7 @@ async def main():
     logger.info("✅ Бот запущен (ЭКСПЕРИМЕНТАЛЬНАЯ ВЕРСИЯ БЕЗ API)")
     
     # Запускаем мониторинг
-    monitor_task = asyncio.create_task(monitor_channel(application))
-    
-    await monitor_task
+    await monitor_channel(application)
 
 if __name__ == '__main__':
     try:
