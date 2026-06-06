@@ -11,8 +11,6 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 BOT_TOKEN = '8891687206:AAHUcgCDsiZr5YqQyx4kWPsMWfmw8IttikA'
 SOURCE_CHANNEL = '@TWSA_HOF'
 BOT_NAME = "Vexor Observer"
-
-# Публичный JSON API для Telegram каналов
 API_URL = f"https://tg.i-c-a.su/json/{SOURCE_CHANNEL}"
 # ==================================
 
@@ -76,9 +74,7 @@ def get_channel_messages(limit=5):
                     'id': msg_id
                 })
             return result
-        else:
-            logger.error(f"Ошибка API: {response.status_code}")
-            return []
+        return []
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         return []
@@ -86,34 +82,30 @@ def get_channel_messages(limit=5):
 # ---------- МОНИТОРИНГ ----------
 last_post_id = None
 
-async def monitor_channel(bot_app):
+async def monitor_channel(context):
     global last_post_id
-    while True:
-        try:
-            posts = get_channel_messages(limit=1)
-            if posts:
-                latest = posts[0]
-                if last_post_id is None:
-                    last_post_id = latest['id']
-                    logger.info(f"Начат мониторинг, последний ID: {last_post_id}")
-                elif latest['id'] != last_post_id:
-                    last_post_id = latest['id']
-                    await send_to_subscribers(bot_app, latest['text'], latest['link'])
-                    logger.info(f"Новый пост отправлен: {latest['link']}")
-            
-            await asyncio.sleep(5)
-        except Exception as e:
-            logger.error(f"Ошибка мониторинга: {e}")
-            await asyncio.sleep(10)
+    try:
+        posts = get_channel_messages(limit=1)
+        if posts:
+            latest = posts[0]
+            if last_post_id is None:
+                last_post_id = latest['id']
+                logger.info(f"Начат мониторинг, ID: {last_post_id}")
+            elif latest['id'] != last_post_id:
+                last_post_id = latest['id']
+                await send_to_subscribers(context.bot, latest['text'], latest['link'])
+                logger.info(f"Новый пост: {latest['link']}")
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
 
-async def send_to_subscribers(bot_app, post_text, post_link):
+async def send_to_subscribers(bot, post_text, post_link):
     subscribers = get_all_subscribers()
     if not subscribers:
         return
     
     for user_id in subscribers:
         try:
-            await bot_app.bot.send_message(
+            await bot.send_message(
                 chat_id=user_id,
                 text=f"🔔 НОВЫЙ ПОСТ!\n\n{post_text[:500]}\n\n{post_link}",
                 disable_web_page_preview=True
@@ -135,6 +127,7 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# ---------- ОБРАБОТЧИКИ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
@@ -154,8 +147,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'subscribe':
         add_subscriber(user_id)
         await query.edit_message_text(
-            f"✅ ПОДПИСАН!\n\n"
-            f"👀 Подписчиков: {len(get_all_subscribers())}",
+            f"✅ ПОДПИСАН!\n\n👀 Подписчиков: {len(get_all_subscribers())}",
             reply_markup=get_main_keyboard()
         )
     
@@ -165,9 +157,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'stats':
         await query.edit_message_text(
-            f"📊 СТАТИСТИКА\n\n"
-            f"👀 Подписчиков: {len(get_all_subscribers())}\n"
-            f"📢 Канал: Vexor cheats | News",
+            f"📊 СТАТИСТИКА\n\n👀 Подписчиков: {len(get_all_subscribers())}\n📢 Канал: Vexor cheats | News",
             reply_markup=get_main_keyboard()
         )
     
@@ -193,20 +183,13 @@ async def main():
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(button_handler))
     
+    # Запускаем мониторинг через JobQueue (каждые 5 секунд)
+    job_queue = application.job_queue
+    if job_queue:
+        job_queue.run_repeating(monitor_channel, interval=5, first=1)
+    
     # Запускаем бота
-    await application.initialize()
-    await application.start()
-    
-    # Запускаем polling в отдельной задаче
-    polling_task = asyncio.create_task(application.updater.start_polling())
-    
-    logger.info("✅ Бот запущен!")
-    
-    # Запускаем мониторинг
-    await monitor_channel(application)
-    
-    # Ожидаем завершения
-    await polling_task
+    await application.run_polling()
 
 if __name__ == '__main__':
     try:
