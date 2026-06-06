@@ -1,54 +1,65 @@
+import os
 import asyncio
-from telethon import TelegramClient, events
-from telethon.tl.functions.channels import JoinChannelRequest
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ========== ТВОИ ДАННЫЕ ==========
-API_ID = 23265830               # Твой api_id
-API_HASH = '64ba5bd3a3826ab7e4b9fa9cfa11239'   # Твой api_hash
-PHONE = '+79087358155'          # ЗАМЕНИ на номер фейкового аккаунта
+# ===== КОНФИГ =====
+BOT_TOKEN = '8891687206:AAHUcgCDsiZr5YqQyx4kWPsMWfmw8IttikA'
+ADMIN_ID =    # Твой Telegram ID (числом). Узнать через @userinfobot
+# =================
 
-# Тестовый канал (твой, для проверки)
-SOURCE_CHANNEL = '@Twst_hof'
+subscribers = set()   # В реальности замени на SQLite или файл
 
-# Куда пересылать ('me' — себе в избранное)
-DEST = 'me'
-# =================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("✅ Подписаться", callback_data='subscribe')],
+        [InlineKeyboardButton("❌ Отписаться", callback_data='unsubscribe')]
+    ]
+    await update.message.reply_text(
+        "👋 Бот-уведомитель канала @vexor_cheat\n"
+        "Нажимай кнопки, чтобы получать новые посты.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-client = TelegramClient('my_working_session', API_ID, API_HASH)
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    subscribers.add(user_id)
+    await update.message.reply_text("✅ Ты подписан на уведомления!")
 
-async def main():
-    await client.start(PHONE)
-    print('[✔] Юзербот авторизован')
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    subscribers.discard(user_id)
+    await update.message.reply_text("❌ Ты отписался.")
 
-    # Вступаем в канал (если ещё не вступили)
-    try:
-        await client(JoinChannelRequest(SOURCE_CHANNEL))
-        print(f'[✔] Подписались на {SOURCE_CHANNEL}')
-    except Exception as e:
-        print(f'[!] Уже подписаны или ошибка: {e}')
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if query.data == 'subscribe':
+        subscribers.add(user_id)
+        await query.edit_message_text("✅ Подписка оформлена.")
+    elif query.data == 'unsubscribe':
+        subscribers.discard(user_id)
+        await query.edit_message_text("❌ Подписка отменена.")
 
-    # Сущность канала-источника
-    source = await client.get_entity(SOURCE_CHANNEL)
-    
-    # Сущность получателя
-    if DEST == 'me':
-        dest = await client.get_me()
-        print('[•] Пересылаю в "Избранное"')
-    else:
-        dest = await client.get_entity(DEST)
-
-    # Слушаем новые сообщения в канале
-    @client.on(events.NewMessage(chats=source))
-    async def forward_to_dest(event):
+async def broadcast_to_subscribers(text: str):
+    """Вызывается извне (например, юзерботом) для массовой рассылки"""
+    for uid in subscribers:
         try:
-            await client.send_message(dest, event.message)
-            text = event.raw_text[:50] if event.raw_text else '[медиа/файл]'
-            print(f'[→] Переслано: {text}')
-        except Exception as e:
-            print(f'[!] Ошибка пересылки: {e}')
+            await application.bot.send_message(chat_id=uid, text=text)
+        except:
+            pass
 
-    print(f'[•] Слежу за каналом {SOURCE_CHANNEL}. Жду сообщений...')
-    await client.run_until_disconnected()
+def main():
+    global application
+    app = Application.builder().token(BOT_TOKEN).build()
+    application = app
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("subscribe", subscribe))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    print("✅ Бот запущен и ждёт команды.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
