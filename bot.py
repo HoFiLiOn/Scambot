@@ -2,16 +2,14 @@ import asyncio
 import sqlite3
 import logging
 import sys
-import requests
-from datetime import datetime
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = '8891687206:AAHUcgCDsiZr5YqQyx4kWPsMWfmw8IttikA'
-SOURCE_CHANNEL = '@TWSA_HOF'
 BOT_NAME = "Vexor Observer"
-API_URL = f"https://tg.i-c-a.su/json/{SOURCE_CHANNEL}"
+ADMIN_ID = 79966598339  # ТВОЙ ID
 # ==================================
 
 logging.basicConfig(
@@ -28,7 +26,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS subscribers (user_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
-    logger.info("База данных готова")
 
 def add_subscriber(user_id):
     conn = sqlite3.connect('subscribers.db')
@@ -52,89 +49,22 @@ def get_all_subscribers():
     conn.close()
     return [row[0] for row in rows]
 
-# ---------- ПОЛУЧЕНИЕ ПОСТОВ ----------
-def get_channel_messages(limit=5):
-    try:
-        response = requests.get(API_URL, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            messages = data.get('messages', [])
-            result = []
-            for msg in messages[:limit]:
-                text = msg.get('text', '📷 Медиа')
-                if isinstance(text, list):
-                    text = ' '.join(str(item) for item in text)
-                date = datetime.fromtimestamp(msg.get('date', 0))
-                msg_id = msg.get('id')
-                link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{msg_id}"
-                result.append({
-                    'text': text[:400],
-                    'date': date,
-                    'link': link,
-                    'id': msg_id
-                })
-            return result
-        return []
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        return []
-
-# ---------- МОНИТОРИНГ ----------
-last_post_id = None
-
-async def monitor_channel(context):
-    global last_post_id
-    try:
-        posts = get_channel_messages(limit=1)
-        if posts:
-            latest = posts[0]
-            if last_post_id is None:
-                last_post_id = latest['id']
-                logger.info(f"Начат мониторинг, ID: {last_post_id}")
-            elif latest['id'] != last_post_id:
-                last_post_id = latest['id']
-                await send_to_subscribers(context.bot, latest['text'], latest['link'])
-                logger.info(f"Новый пост: {latest['link']}")
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-
-async def send_to_subscribers(bot, post_text, post_link):
-    subscribers = get_all_subscribers()
-    if not subscribers:
-        return
-    
-    for user_id in subscribers:
-        try:
-            await bot.send_message(
-                chat_id=user_id,
-                text=f"🔔 НОВЫЙ ПОСТ!\n\n{post_text[:500]}\n\n{post_link}",
-                disable_web_page_preview=True
-            )
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            if "Forbidden" in str(e):
-                remove_subscriber(user_id)
-            logger.error(f"Ошибка {user_id}: {e}")
-
 # ---------- КНОПКИ ----------
 def get_main_keyboard():
     keyboard = [
         [InlineKeyboardButton("✅ ПОДПИСАТЬСЯ", callback_data='subscribe')],
         [InlineKeyboardButton("❌ ОТПИСАТЬСЯ", callback_data='unsubscribe')],
-        [InlineKeyboardButton("📜 ПОСЛЕДНИЕ 5", callback_data='last_5')],
-        [InlineKeyboardButton("📜 ПОСЛЕДНИЕ 10", callback_data='last_10')],
         [InlineKeyboardButton("📊 СТАТИСТИКА", callback_data='stats')],
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ---------- ОБРАБОТЧИКИ ----------
+# ---------- КОМАНДЫ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
         f"👁 {BOT_NAME}\n\n"
         f"Привет, {user.first_name}!\n\n"
-        f"Я слежу за каналом Vexor cheats | News\n"
-        f"и присылаю новые посты.\n\n"
+        f"Подпишись, чтобы получать новые посты из Vexor cheats | News\n\n"
         f"👇 ВЫБЕРИ ДЕЙСТВИЕ:",
         reply_markup=get_main_keyboard()
     )
@@ -157,44 +87,79 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'stats':
         await query.edit_message_text(
-            f"📊 СТАТИСТИКА\n\n👀 Подписчиков: {len(get_all_subscribers())}\n📢 Канал: Vexor cheats | News",
+            f"📊 СТАТИСТИКА\n\n👀 Подписчиков: {len(get_all_subscribers())}",
             reply_markup=get_main_keyboard()
         )
+
+# ---------- КОМАНДЫ АДМИНА ----------
+async def post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить пост всем подписчикам - /post текст"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Только для админа")
+        return
     
-    elif query.data in ['last_5', 'last_10']:
-        n = 5 if query.data == 'last_5' else 10
-        await query.edit_message_text(f"⏳ Загружаю {n} постов...")
-        
-        posts = get_channel_messages(limit=n)
-        if posts:
-            text = "\n\n".join([f"📌 {p['date'].strftime('%d.%m %H:%M')}\n{p['text']}\n{p['link']}" for p in posts])
-            await query.edit_message_text(text, disable_web_page_preview=True)
-        else:
-            await query.edit_message_text("❌ Ошибка загрузки", reply_markup=get_main_keyboard())
+    text = ' '.join(context.args)
+    if not text:
+        await update.message.reply_text("❌ Используй: /post текст поста")
+        return
+    
+    subscribers = get_all_subscribers()
+    if not subscribers:
+        await update.message.reply_text("Нет подписчиков")
+        return
+    
+    await update.message.reply_text(f"📤 Рассылаю {len(subscribers)} подписчикам...")
+    
+    success = 0
+    for user_id in subscribers:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🔔 НОВЫЙ ПОСТ ИЗ КАНАЛА!\n\n{text}"
+            )
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            if "Forbidden" in str(e):
+                remove_subscriber(user_id)
+    
+    await update.message.reply_text(f"✅ Отправлено: {success}/{len(subscribers)}")
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить любое сообщение - /broadcast текст"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Только для админа")
+        return
+    
+    text = ' '.join(context.args)
+    if not text:
+        await update.message.reply_text("❌ Используй: /broadcast текст")
+        return
+    
+    subscribers = get_all_subscribers()
+    for user_id in subscribers:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=text)
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error(f"Ошибка {user_id}: {e}")
+    
+    await update.message.reply_text("✅ Готово")
 
 # ---------- ЗАПУСК ----------
 async def main():
     init_db()
     
-    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CommandHandler('post', post))
+    application.add_handler(CommandHandler('broadcast', broadcast))
     
-    # Запускаем мониторинг через JobQueue (каждые 5 секунд)
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(monitor_channel, interval=5, first=1)
+    logger.info("✅ Бот запущен! Используй /post текст для рассылки")
     
-    # Запускаем бота
     await application.run_polling()
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен")
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
+    asyncio.run(main())
