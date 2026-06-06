@@ -2,20 +2,25 @@ import asyncio
 import sqlite3
 import logging
 import sys
-
-from telethon import TelegramClient, events
+import feedparser
+import requests
+import time
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from bs4 import BeautifulSoup
 
 # ========== КОНФИГУРАЦИЯ ==========
-API_ID = 23265830
-API_HASH = '64ba5bd3a3826ab7e4b9fa9cfa11239'
-PHONE = '+79966598339'
 BOT_TOKEN = '8891687206:AAHUcgCDsiZr5YqQyx4kWPsMWfmw8IttikA'
-
-SOURCE_CHANNEL = '@TWSA_HOF'
+SOURCE_CHANNEL = '@TWSA_HOF'  # Для RSS нужно преобразовать
 BOT_NAME = "Vexor Observer"
-# ==================================
+
+# Каналы Telegram редко имеют RSS, но есть костыль через tgstat или t.me/rss/
+# ИЛИ используем публичный API: https://api.telegram.org/bot{token}/getUpdates
+# Но для чтения канала без API_ID - почти невозможно.
+
+# Альтернатива: парсинг через tg-channel-parser (публичный)
+# ==========================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +36,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS subscribers (user_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
-    logger.info("База данных инициализирована")
 
 def add_subscriber(user_id):
     conn = sqlite3.connect('subscribers.db')
@@ -55,42 +59,106 @@ def get_all_subscribers():
     conn.close()
     return [row[0] for row in rows]
 
-def get_subscriber_count():
-    conn = sqlite3.connect('subscribers.db')
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM subscribers')
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+# ---------- ПАРСИНГ КАНАЛА ЧЕРЕЗ ПУБЛИЧНЫЙ ПРОКСИ ----------
+# Некоторые сервисы предоставляют RSS для Telegram каналов
+# Например: https://tg.i-c-a.su/json/@TWSA_HOF
+# Или: https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1
 
-# ---------- ЦВЕТНЫЕ КНОПКИ ----------
+RSS_URL = f"https://tg.i-c-a.su/json/@TWSA_HOF"  # Публичный API без авторизации
+
+async def get_last_posts(limit=5):
+    try:
+        response = requests.get(RSS_URL, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            posts = []
+            for msg in data.get('messages', [])[:limit]:
+                text = msg.get('text', 'Нет текста')
+                date = datetime.fromtimestamp(msg.get('date', 0))
+                link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{msg.get('id')}"
+                posts.append({
+                    'text': text[:400],
+                    'date': date,
+                    'link': link
+                })
+            return posts
+        else:
+            logger.error(f"Ошибка API: {response.status_code}")
+            return []
+    except Exception as e:
+        logger.error(f"Ошибка парсинга: {e}")
+        return []
+
+async def monitor_channel(bot_app: Application):
+    """Мониторинг новых постов через публичный API"""
+    last_post_id = None
+    
+    while True:
+        try:
+            response = requests.get(RSS_URL, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                messages = data.get('messages', [])
+                
+                if messages:
+                    latest = messages[0]
+                    current_id = latest.get('id')
+                    
+                    if last_post_id is None:
+                        last_post_id = current_id
+                        logger.info(f"Начат мониторинг, последний ID: {last_post_id}")
+                    elif current_id != last_post_id:
+                        # Новый пост!
+                        last_post_id = current_id
+                        text = latest.get('text', 'Новый пост')
+                        link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{current_id}"
+                        await send_to_subscribers(bot_app, text, link)
+                        logger.info(f"Новый пост отправлен подписчикам: {link}")
+            
+            await asyncio.sleep(5)  # Проверяем каждые 5 секунд
+            
+        except Exception as e:
+            logger.error(f"Ошибка мониторинга: {e}")
+            await asyncio.sleep(10)
+
+# ---------- РАССЫЛКА ----------
+async def send_to_subscribers(bot_app: Application, post_text: str, post_link: str):
+    subscribers = get_all_subscribers()
+    if not subscribers:
+        return
+    
+    for user_id in subscribers:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=user_id,
+                text=f"🔔 НОВЫЙ ПОСТ!\n\n{post_text[:500]}\n\n{post_link}",
+                disable_web_page_preview=True
+            )
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            if "Forbidden" in str(e):
+                remove_subscriber(user_id)
+            logger.error(f"Ошибка {user_id}: {e}")
+
+# ---------- КНОПКИ ----------
 def get_main_keyboard():
     keyboard = [
-        [
-            InlineKeyboardButton("✅ ПОДПИСАТЬСЯ", callback_data='subscribe', style='success'),
-            InlineKeyboardButton("❌ ОТПИСАТЬСЯ", callback_data='unsubscribe', style='danger'),
-        ],
-        [
-            InlineKeyboardButton("📜 ПОСЛЕДНИЕ 5", callback_data='last_5', style='primary'),
-            InlineKeyboardButton("📜 ПОСЛЕДНИЕ 10", callback_data='last_10', style='primary'),
-        ],
-        [
-            InlineKeyboardButton("📊 СТАТИСТИКА", callback_data='stats', style='primary'),
-        ],
+        [InlineKeyboardButton("✅ ПОДПИСАТЬСЯ", callback_data='subscribe')],
+        [InlineKeyboardButton("❌ ОТПИСАТЬСЯ", callback_data='unsubscribe')],
+        [InlineKeyboardButton("📜 ПОСЛЕДНИЕ 5", callback_data='last_5')],
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ---------- БОТ КОМАНДЫ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
-        f"<b>👁 {BOT_NAME}</b>\n\n"
+        f"👁 {BOT_NAME} (BETA - БЕЗ API)\n\n"
         f"Привет, {user.first_name}!\n\n"
-        f"Я слежу за каналом <b>Vexor cheats | News</b>\n"
-        f"и присылаю новые посты.\n\n"
-        f"👇 <b>ВЫБЕРИ ДЕЙСТВИЕ:</b>",
-        reply_markup=get_main_keyboard(),
-        parse_mode='HTML'
+        f"⚠️ Экспериментальная версия без API ID/Hash\n"
+        f"Работает через публичный парсинг канала.\n\n"
+        f"Может работать с задержкой и нестабильно.\n\n"
+        f"👇 ВЫБЕРИ ДЕЙСТВИЕ:",
+        reply_markup=get_main_keyboard()
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,141 +169,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'subscribe':
         add_subscriber(user_id)
         await query.edit_message_text(
-            f"<b>✅ ТЫ ПОДПИСАН</b>\n\n"
-            f"Новые посты будут приходить сюда.\n\n"
-            f"👀 Наблюдателей: <b>{get_subscriber_count()}</b>",
-            reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
+            f"✅ ТЫ ПОДПИСАН (ЭКСПЕРИМЕНТ)\n\n"
+            f"Попробуем следить без API...\n\n"
+            f"👀 Наблюдателей: {len(get_all_subscribers())}",
+            reply_markup=get_main_keyboard()
         )
     
     elif query.data == 'unsubscribe':
         remove_subscriber(user_id)
         await query.edit_message_text(
-            f"<b>❌ ТЫ ОТПИСАН</b>\n\n"
-            f"Посты больше приходить не будут.",
-            reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
+            f"❌ ТЫ ОТПИСАН",
+            reply_markup=get_main_keyboard()
         )
     
-    elif query.data == 'stats':
-        await query.edit_message_text(
-            f"<b>📊 СТАТИСТИКА</b>\n\n"
-            f"👀 Наблюдателей: <b>{get_subscriber_count()}</b>\n"
-            f"📢 Канал: <b>Vexor cheats | News</b>",
-            reply_markup=get_main_keyboard(),
-            parse_mode='HTML'
-        )
-    
-    elif query.data in ['last_5', 'last_10']:
-        n = 5 if query.data == 'last_5' else 10
-        await query.edit_message_text(f"⏳ Загружаю {n} последних постов...", parse_mode='HTML')
+    elif query.data == 'last_5':
+        await query.edit_message_text("⏳ Загружаю последние 5 постов...")
         
-        try:
-            async with TelegramClient('temp_session', API_ID, API_HASH) as temp_client:
-                await temp_client.start(PHONE)
-                channel = await temp_client.get_entity(SOURCE_CHANNEL)
-                messages = []
-                async for msg in temp_client.iter_messages(channel, limit=n):
-                    text = msg.text if msg.text else "📷 Медиа"
-                    if len(text) > 400:
-                        text = text[:400] + "..."
-                    link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{msg.id}"
-                    messages.append(
-                        f"<b>📌 {msg.date.strftime('%d.%m %H:%M')}</b>\n"
-                        f"{text}\n"
-                        f"<a href='{link}'>🔗 Читать</a>"
-                    )
-                
-                if messages:
-                    await query.edit_message_text(
-                        "\n\n".join(messages),
-                        parse_mode='HTML',
-                        disable_web_page_preview=True
-                    )
-                else:
-                    await query.edit_message_text("Нет постов в канале", reply_markup=get_main_keyboard(), parse_mode='HTML')
-        except Exception as e:
-            logger.error(f"Ошибка: {e}")
-            await query.edit_message_text("❌ Ошибка загрузки постов", reply_markup=get_main_keyboard(), parse_mode='HTML')
+        posts = await get_last_posts(5)
+        if posts:
+            text = "\n\n".join([f"📌 {p['date'].strftime('%d.%m %H:%M')}\n{p['text']}\n{p['link']}" for p in posts])
+            await query.edit_message_text(text, disable_web_page_preview=True)
+        else:
+            await query.edit_message_text("❌ Не удалось загрузить посты")
 
-# ---------- РАССЫЛКА ----------
-async def send_to_subscribers(application: Application, post_text: str, post_link: str):
-    subscribers = get_all_subscribers()
-    if not subscribers:
-        return
-    
-    for user_id in subscribers:
-        try:
-            await application.bot.send_message(
-                chat_id=user_id,
-                text=f"<b>🔔 НОВЫЙ ПОСТ!</b>\n\n{post_text[:500]}\n\n<a href='{post_link}'>🔗 Открыть</a>",
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            if "Forbidden" in str(e):
-                remove_subscriber(user_id)
-            logger.error(f"Ошибка {user_id}: {e}")
-
-# ---------- ОБРАБОТЧИК ФОРВАРДА ----------
-async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-    
-    text = update.message.text
-    if text.startswith('/forward_post'):
-        parts = text.split('\n', 1)
-        if len(parts) == 2:
-            link_part = parts[0].replace('/forward_post ', '')
-            post_text = parts[1]
-            await send_to_subscribers(context.application, post_text, link_part)
-
-# ---------- ЮЗЕРБОТ ----------
-async def run_userbot():
-    client = TelegramClient('userbot_session', API_ID, API_HASH)
-    await client.start(PHONE)
-    logger.info(f"✅ Юзербот запущен, слежу за {SOURCE_CHANNEL}")
-    
-    bot_entity = await client.get_entity(int(BOT_TOKEN.split(':')[0]))
-    
-    @client.on(events.NewMessage(chats=SOURCE_CHANNEL))
-    async def on_new_post(event):
-        try:
-            post_text = event.message.text if event.message.text else "Новый пост"
-            post_link = f"https://t.me/{SOURCE_CHANNEL[1:]}/{event.message.id}"
-            
-            await client.send_message(
-                bot_entity,
-                f"/forward_post {post_link}\n{post_text[:500]}"
-            )
-            logger.info("✅ Новый пост отправлен боту")
-        except Exception as e:
-            logger.error(f"❌ Ошибка пересылки: {e}")
-    
-    await client.run_until_disconnected()
-
-# ---------- ОСНОВНОЙ ЗАПУСК ----------
+# ---------- ЗАПУСК ----------
 async def main():
     init_db()
     
-    # Создаём приложение бота
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('forward_post', handle_forward))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # Запускаем бота
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
-    logger.info("✅ Бот запущен и готов к работе!")
+    logger.info("✅ Бот запущен (ЭКСПЕРИМЕНТАЛЬНАЯ ВЕРСИЯ БЕЗ API)")
     
-    # Запускаем юзербота параллельно
-    userbot_task = asyncio.create_task(run_userbot())
+    # Запускаем мониторинг
+    monitor_task = asyncio.create_task(monitor_channel(application))
     
-    # Ждём завершения (никогда не завершится)
-    await userbot_task
+    await monitor_task
 
 if __name__ == '__main__':
     try:
