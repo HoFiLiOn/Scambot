@@ -3,7 +3,6 @@ import sqlite3
 import logging
 import sys
 import requests
-import json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -13,7 +12,7 @@ BOT_TOKEN = '8891687206:AAHUcgCDsiZr5YqQyx4kWPsMWfmw8IttikA'
 SOURCE_CHANNEL = '@TWSA_HOF'
 BOT_NAME = "Vexor Observer"
 
-# Публичный JSON API для Telegram каналов (без авторизации)
+# Публичный JSON API для Telegram каналов
 API_URL = f"https://tg.i-c-a.su/json/{SOURCE_CHANNEL}"
 # ==================================
 
@@ -116,7 +115,7 @@ async def send_to_subscribers(bot_app, post_text, post_link):
         try:
             await bot_app.bot.send_message(
                 chat_id=user_id,
-                text=f"🔔 НОВЫЙ ПОСТ В КАНАЛЕ!\n\n{post_text[:500]}\n\n{post_link}",
+                text=f"🔔 НОВЫЙ ПОСТ!\n\n{post_text[:500]}\n\n{post_link}",
                 disable_web_page_preview=True
             )
             await asyncio.sleep(0.05)
@@ -139,10 +138,10 @@ def get_main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
-        f"👁 {BOT_NAME} (ЭКСПЕРИМЕНТ)\n\n"
+        f"👁 {BOT_NAME}\n\n"
         f"Привет, {user.first_name}!\n\n"
-        f"⚠️ Версия БЕЗ API ID/Hash\n"
-        f"Работает через публичный парсинг.\n\n"
+        f"Я слежу за каналом Vexor cheats | News\n"
+        f"и присылаю новые посты.\n\n"
         f"👇 ВЫБЕРИ ДЕЙСТВИЕ:",
         reply_markup=get_main_keyboard()
     )
@@ -155,7 +154,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'subscribe':
         add_subscriber(user_id)
         await query.edit_message_text(
-            f"✅ ПОДПИСАН (ЭКСПЕРИМЕНТ)\n\n"
+            f"✅ ПОДПИСАН!\n\n"
             f"👀 Подписчиков: {len(get_all_subscribers())}",
             reply_markup=get_main_keyboard()
         )
@@ -168,37 +167,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"📊 СТАТИСТИКА\n\n"
             f"👀 Подписчиков: {len(get_all_subscribers())}\n"
-            f"📢 Канал: Vexor cheats | News\n"
-            f"⚠️ Режим: экспериментальный (без API)",
+            f"📢 Канал: Vexor cheats | News",
             reply_markup=get_main_keyboard()
         )
     
     elif query.data in ['last_5', 'last_10']:
         n = 5 if query.data == 'last_5' else 10
-        await query.edit_message_text(f"⏳ Загружаю {n} последних постов...")
+        await query.edit_message_text(f"⏳ Загружаю {n} постов...")
         
         posts = get_channel_messages(limit=n)
         if posts:
             text = "\n\n".join([f"📌 {p['date'].strftime('%d.%m %H:%M')}\n{p['text']}\n{p['link']}" for p in posts])
             await query.edit_message_text(text, disable_web_page_preview=True)
         else:
-            await query.edit_message_text("❌ Ошибка загрузки постов", reply_markup=get_main_keyboard())
+            await query.edit_message_text("❌ Ошибка загрузки", reply_markup=get_main_keyboard())
 
 # ---------- ЗАПУСК ----------
 async def main():
     init_db()
     
+    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Добавляем обработчики
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(button_handler))
     
+    # Запускаем бота
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
-    logger.info("✅ Бот запущен (ЭКСПЕРИМЕНТАЛЬНАЯ ВЕРСИЯ БЕЗ API)")
+    
+    # Запускаем polling в отдельной задаче
+    polling_task = asyncio.create_task(application.updater.start_polling())
+    
+    logger.info("✅ Бот запущен!")
     
     # Запускаем мониторинг
     await monitor_channel(application)
+    
+    # Ожидаем завершения
+    await polling_task
 
 if __name__ == '__main__':
     try:
